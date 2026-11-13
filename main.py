@@ -9,12 +9,12 @@ from Agents.AIs.l2 import Agent as l2
 from Agents.AIs.leela import Agent as leela
 
 if __name__=="__main__":
-    train(leela, resume_training=True, num_cycles=1001)
+    train(leela, resume_training=True, num_cycles=1501)
     
 
 """
-To watch evals vs greedy in real time, run:
-python -m Eval.plot_results --agent AGENT_NAME --watch 
+To watch evals in real time, run:
+python -m Eval.plot_results --agent AGENT_NAME --suite --watch OPTIONAL: --buckets 3 --smooth 2 --since 500
 
 To watch loss in real time, run:
 python -m Eval.plot_results --agent AGENT_NAME --loss --watch 

@@ -19,7 +19,7 @@ The positions are saved as a book (same format as Eval/opening_book.py), so the 
 
 Generate (from the repo root):
     python -m Eval.eval_positions --agent leela --checkpoint gen_1000
-    python -m Eval.eval_positions --agent leela --checkpoint gen_1000 --sims 20000 --random 25 --selfplay 50 --out path.json
+    python -m Eval.eval_positions --agent leela --checkpoint gen_1000 --sims 3000 --random 25 --selfplay 50 --out path.json
 
 Everything is seeded, so the same arguments give the same positions (given the same code and weights).
 """
@@ -48,7 +48,7 @@ SELFPLAY_PLIES = [(4, 6), (7, 12), (13, 18)]    # self-play ply ranges, split ev
 Q_BINS = [(0.0, 0.2), (0.2, 0.5), (0.5, 1.01)]  # |Q| bins: (low, high], the first includes 0
 Q_SHARES = [0.4, 0.4, 0.2]        # target share of each bin
 BIN_NAMES = ["balanced", "better", "winning"]
-SIMS = 20000                      # search size for scoring each candidate
+SIMS = 3000                       # search size for scoring each candidate
 PER_ROUND = 12                    # candidates generated per unfilled stratum per round
 MAX_CANDIDATES = 4000             # per stratum; error if the quotas still aren't met
 WORKERS = 6

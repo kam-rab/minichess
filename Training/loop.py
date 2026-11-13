@@ -4,7 +4,8 @@ import csv
 from multiprocessing import Pool
 from Training.ring_buffer import RingBuffer
 from Training.self_play import self_play_games
-from Eval.tourney import eval_games, list_checkpoints, append_row
+from Eval.eval_suite import eval_checkpoint
+from Eval.tourney import list_checkpoints, append_row
 from Agents.greedy_material import Agent as Greedy
 
 
@@ -64,6 +65,8 @@ def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES):
     # start cycle with workers generating self play games and running evals
     with Pool(WORKERS) as pool:
         for cycle in range(start, num_cycles):
+            print("CYCLE: ", cycle)
+
             trainee.model.save(str(LATEST))          # publish current weights to the workers
             cycle_split = [0, 0, 0]
             cycle_stats = []
@@ -94,13 +97,14 @@ def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES):
             loss_names = ["policy CE", "value MSE", "moves_left_MSE"]
             for i in range(len(losses)):
                 loss_printout += loss_names[i] + f": {losses[i]:.4f}   "    
-            print("\n")
-            print("CYCLE: ", cycle)
+
             print(loss_printout)
             print("White win rate: ", cycle_split[2]/sum(cycle_split))
             print("Draw rate: ", cycle_split[1]/sum(cycle_split))
             print("Black win rate: ", cycle_split[0]/sum(cycle_split))
             print(f"Endgame starts: {n_end}   endgame pool: {len(endgame_pool)}")
+            print("\n")
+
 
             # save checkpoint
             trainee.model.save(str(agent_class.CHECKPOINT_DIR / f"gen_{cycle:03d}.npz"))
@@ -115,12 +119,11 @@ def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES):
                 prev.unlink(missing_ok=True)
     
             # eval againts fixed opponents occasinoally
-            if cycle % NUM_CYCLES_BEFORE_EVAL == 0:
-                w, d, l = eval_games(pool, agent_class, str(agent_class.CHECKPOINT_DIR / f"gen_{cycle:03d}.npz"), Greedy, NUM_EVAL_GAMES,
-                                     openings_path=EVAL_RESULTS_DIR / name / "openings" / f"gen_{cycle:03d}.json")    # view with: python -m UI --book <path>
-                append_row(EVAL_CSV, cycle, w, d, l)
-                print("\n")
-                print(f"vs Greedy  W/D/L {w}/{d}/{l}")
+            # fixed is gen_1000 leela, moving is 100 cycles previous from current gen. 
+            # 25 games (each side) against greedy, 50 from each side against both fixed and moving
+            eval_checkpoint(pool, agent_class, cycle, greedy_every=50, greedy_positions=25, fixed_gen=1000, fixed_every=100, fixed_positions=50,
+                            moving_gap=100, moving_every=100, moving_positions=50)
+
 
 
 def append_loss_row(path, cycle, policy_loss, value_loss, ce_floor, moves_left_loss=None):

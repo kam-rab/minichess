@@ -9,6 +9,8 @@ Run from the repo root:
     python -m Eval.plot_results --agent l2 --loss            # training loss instead
     python -m Eval.plot_results --agent l2 --games           # self-play game log (end reasons, conversion, endgames)
     python -m Eval.plot_results --agent l2 --material        # material vs ply scatter from the game log, by result / draw type
+    python -m Eval.plot_results --agent leela --suite        # eval suite (Eval/eval_suite.py): score by opponent and Q bucket
+    python -m Eval.plot_results --agent leela --suite --buckets 3 --smooth 2 --since 500
     python -m Eval.plot_results --agent l2 --watch           # redraw every 30 s while training runs
     python -m Eval.plot_results --agent l2 --loss --watch --interval 10
     python -m Eval.plot_results --csv path/to/file.csv --title "Some title"   # any CSV (add --loss for a loss CSV)
@@ -391,7 +393,156 @@ def draw_material(fig, csv_path, title, since=None, last=None):
     _tight_layout_wrapped(fig)
 
 
-FIGSIZES = {draw_games: (14, 8), draw_material: (20, 11)}     # anything else: (9, 7)
+# ---------------------------------------------------------------- eval suite
+
+SUITE_OPPONENTS = [("greedy", "vs greedy"), ("fixed", "vs fixed checkpoint"), ("moving", "vs moving checkpoint")]
+SUITE_BUCKETS = {   # name -> color; the model's view of the start position (Q from the model that scored the positions)
+    "losing": "#c62828", "worse": "#ef9a9a", "balanced": "#616161", "better": "#81c784", "winning": "#2e7d32"}
+SUITE_MERGE_3 = {"losing": "worse", "worse": "worse", "balanced": "balanced", "better": "better", "winning": "better"}
+SUITE_SOURCES = {"random 4-6": "#8e24aa", "self-play 4-6": "#90caf9", "self-play 7-12": "#42a5f5", "self-play 13-18": "#1565c0"}
+SUITE_SELFPLAY_PLIES = [(4, 6), (7, 12), (13, 18)]     # as in Eval/eval_positions.py
+
+
+def _suite_source(r):
+    if r["source"] != "selfplay":
+        return "random 4-6"
+    ply = int(r["ply"])
+    lo, hi = next(((lo, hi) for lo, hi in SUITE_SELFPLAY_PLIES if lo <= ply <= hi), (ply, ply))
+    return f"self-play {lo}-{hi}"
+
+
+def _pooled(rows, cycles, smooth):
+    """For each cycle, the games of that eval and the smooth - 1 evals before it (pooled, not averaged)."""
+    by_cycle = {c: [r for r in rows if r["cycle"] == c] for c in cycles}
+    return [sum((by_cycle[cycles[j]] for j in range(max(0, i - smooth + 1), i + 1)), []) for i in range(len(cycles))]
+
+
+LEGEND_SPOTS = ["upper left", "upper center", "lower left", "lower center", "center left", "center"]   # never on the right,
+                                                                                                    # where the newest evals are
+
+
+def _legend_off_right(ax, **kwargs):
+    """Place the legend at whichever of LEGEND_SPOTS covers the fewest plotted points (like loc="best", minus the right side)."""
+    fig = ax.figure
+    renderer = fig.canvas.get_renderer() if hasattr(fig.canvas, "get_renderer") else fig._get_renderer()
+    points = [line.get_transform().transform(line.get_xydata()) for line in ax.lines if len(line.get_xydata())]
+    points = np.concatenate(points) if points else np.empty((0, 2))
+    best, best_cover = LEGEND_SPOTS[0], None
+    for spot in LEGEND_SPOTS:
+        box = ax.legend(loc=spot, **kwargs).get_window_extent(renderer)
+        cover = int(np.sum((points[:, 0] >= box.x0) & (points[:, 0] <= box.x1) & (points[:, 1] >= box.y0) & (points[:, 1] <= box.y1)))
+        if best_cover is None or cover < best_cover:
+            best, best_cover = spot, cover
+    ax.legend(loc=best, **kwargs)
+
+
+def _score_se(games):
+    """(score, standard error) of a list of game rows; score = mean of 1 / 0.5 / 0 per game."""
+    x = np.array([r["score"] for r in games])
+    if not len(x):
+        return np.nan, np.nan
+    return x.mean(), (x.std() / np.sqrt(len(x)) if len(x) > 1 else np.nan)
+
+
+def draw_suite(fig, csv_path, title, buckets=5, smooth=1, since=None, last=None):
+    """
+    Clear fig and draw the eval suite results, one column per opponent (greedy, fixed, moving):
+        top:    score per eval (W + D/2), with a +-1 standard error band, over faded win / draw / loss bars;
+                0.5 = even (each position is played from both sides, so the positions' expected score averages out to 0.5)
+        middle: score per Q bucket from the model's view (buckets=5: losing / worse / balanced / better / winning;
+                buckets=3: worse / balanced / better), each with its expected score (from the positions' Q) dashed
+        bottom: score per position source (random openings, self-play by ply range)
+    smooth: pool each eval with the smooth - 1 evals before it (the buckets are small, e.g. 5 games).
+    since / last: only evals from cycle `since` on, or from the newest `last` cycles. Legends give the average
+    over the evals shown.
+    """
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    for r in rows:
+        r["cycle"] = int(r["cycle"])
+        r["score"] = (int(r["result"]) + 1) / 2
+        r["expected"] = float(r["expected"])
+        r["bucket"] = SUITE_MERGE_3[r["bucket"]] if buckets == 3 else r["bucket"]
+        r["source"] = _suite_source(r)
+    if last is not None and rows:
+        since = max(r["cycle"] for r in rows) - last + 1      # recomputed each redraw, so it follows --watch
+    if since is not None:
+        rows = [r for r in rows if r["cycle"] >= since]
+    bucket_colors = {b: SUITE_BUCKETS[b] for b in (("worse", "balanced", "better") if buckets == 3 else SUITE_BUCKETS)}
+
+    fig.clear()
+    axes = fig.subplots(3, 3, sharex="col", sharey="row")
+    for col, (opp, label) in enumerate(SUITE_OPPONENTS):
+        ax_score, ax_buckets, ax_sources = axes[:, col]
+        opp_rows = [r for r in rows if r["opponent"] == opp]
+        cycles = sorted({r["cycle"] for r in opp_rows})
+        if opp_rows:
+            ckpts = sorted({r["opponent_checkpoint"] for r in opp_rows if r["opponent_checkpoint"]})
+            if opp == "fixed" and ckpts:
+                label = f"vs fixed {ckpts[0]}" if len(ckpts) == 1 else label
+            elif opp == "moving":
+                gaps = sorted({r["cycle"] - int(r["opponent_checkpoint"].split("_")[1]) for r in opp_rows})
+                label = f"vs moving (gen - {gaps[0]})" if len(gaps) == 1 else label
+            per_eval = len(opp_rows) // len(cycles)
+            label += f"\n{per_eval // 2} positions x 2 sides per eval, {len(cycles)} eval{'s' if len(cycles) != 1 else ''}"
+        ax_score.set_title(label, fontsize=11)
+        if not opp_rows:
+            for ax in (ax_score, ax_buckets, ax_sources):
+                ax.text(0.5, 0.5, "no evals yet", ha="center", va="center", transform=ax.transAxes, color="gray")
+            continue
+        pooled = _pooled(opp_rows, cycles, smooth)
+
+        # top: win / draw / loss shares as faded stacked bars, the score line over them
+        w = np.array([np.mean([r["score"] == 1 for r in g]) for g in pooled])
+        d = np.array([np.mean([r["score"] == 0.5 for r in g]) for g in pooled])
+        width = 0.7 * (min(np.diff(cycles)) if len(cycles) > 1 else 50)
+        ax_score.bar(cycles, w, width, color="#4caf50", alpha=0.45, label="Win", zorder=1)
+        ax_score.bar(cycles, d, width, bottom=w, color="#9e9e9e", alpha=0.45, label="Draw", zorder=1)
+        ax_score.bar(cycles, 1 - w - d, width, bottom=w + d, color="#e57373", alpha=0.45, label="Loss", zorder=1)
+        score, se = np.array([_score_se(g) for g in pooled]).T
+        ax_score.fill_between(cycles, score - se, score + se, alpha=0.25, color="#1e88e5", zorder=2)
+        ax_score.plot(cycles, score, marker="o", color="#1e88e5", label=f"score (avg {_score_se(opp_rows)[0]:.2f})", zorder=3)
+        ax_score.axhline(0.5, linestyle="--", color="gray", lw=1, zorder=2)
+        ax_score.set_ylim(0, 1)                 # final limits before placing the legend, so the points are where they'll be drawn
+        _legend_off_right(ax_score, fontsize=7)
+
+        # middle: score per Q bucket, expected dashed; bottom: score per position source
+        for ax, key, colors in ((ax_buckets, "bucket", bucket_colors), (ax_sources, "source", SUITE_SOURCES)):
+            for g, color in colors.items():
+                g_rows = [r for r in opp_rows if r[key] == g]
+                if not g_rows:
+                    continue
+                g_score = [_score_se([r for r in games if r[key] == g])[0] for games in pooled]
+                n = len(g_rows) // len(cycles)
+                ax.plot(cycles, g_score, marker="o", ms=3, color=color, label=f"{g} ({n}/eval, avg {_score_se(g_rows)[0]:.2f})")
+                if key == "bucket":
+                    ax.axhline(np.mean([r["expected"] for r in g_rows]), linestyle="--", color=color, lw=1)
+            if key == "source":
+                ax.axhline(0.5, linestyle="--", color="gray", lw=1)
+            ax.set_ylim(0, 1)
+            _legend_off_right(ax, fontsize=7)
+        ax_sources.set_xlabel("Training cycle")
+
+    axes[0, 0].set_ylabel("Score (W + ½D)\nover win / draw / loss shares")
+    axes[1, 0].set_ylabel("Score by start position\n(dashed: expected from Q)")
+    axes[2, 0].set_ylabel("Score by position source")
+    for ax in axes.flat:
+        ax.set_ylim(0, 1)
+    window = f", newest {last} cycles" if last is not None else f", cycle {since} on" if since is not None else ""
+    smoothing = f", each point pools {smooth} evals" if smooth > 1 else ""
+    fig.suptitle(f"{title}\n(Q buckets from the model's side{window}{smoothing})")
+    _tight_layout_wrapped(fig)
+
+
+def suite_csv(agent):
+    """The agent's eval suite CSV (Eval/training/<agent>/<agent>_suite_<checkpoint>.csv), the newest if there are several."""
+    found = sorted((RESULTS_DIR / agent).glob(f"{agent}_suite_*.csv"), key=lambda p: p.stat().st_mtime)
+    if not found:
+        raise FileNotFoundError(f"no {agent}_suite_*.csv in {RESULTS_DIR / agent}; run Eval/eval_suite.py first")
+    return found[-1]
+
+
+FIGSIZES = {draw_games: (14, 8), draw_material: (20, 11), draw_suite: (17, 11)}     # anything else: (9, 7)
 
 
 def _figsize(draw_fn):
@@ -440,8 +591,11 @@ if __name__ == "__main__":
     parser.add_argument("--loss", action="store_true", help="plot training loss instead of W/D/L")
     parser.add_argument("--games", action="store_true", help="plot the self-play game log instead of W/D/L")
     parser.add_argument("--material", action="store_true", help="plot material vs ply from the game log")
-    parser.add_argument("--since", type=int, default=None, help="--material: only games from this cycle on")
-    parser.add_argument("--last", type=int, default=None, help="--material: only games from the newest N cycles")
+    parser.add_argument("--suite", action="store_true", help="plot the eval suite results (Eval/eval_suite.py)")
+    parser.add_argument("--buckets", type=int, choices=[3, 5], default=5, help="--suite: Q buckets in the middle row")
+    parser.add_argument("--smooth", type=int, default=1, help="--suite: pool each eval with the N - 1 before it")
+    parser.add_argument("--since", type=int, default=None, help="--material / --suite: only from this cycle on")
+    parser.add_argument("--last", type=int, default=None, help="--material / --suite: only the newest N cycles")
     parser.add_argument("--csv", default=None, help="CSV to plot (overrides --agent)")
     parser.add_argument("--title", default=None, help="plot title (overrides the --agent default)")
     parser.add_argument("--watch", action="store_true", help="redraw as new rows are added")
@@ -452,22 +606,29 @@ if __name__ == "__main__":
         available = sorted(p.name for p in RESULTS_DIR.iterdir() if p.is_dir()) if RESULTS_DIR.exists() else []
         parser.error(f"pass --agent (available: {', '.join(available) or 'none yet'}) or --csv")
 
-    if (args.since is not None or args.last is not None) and not args.material:
-        parser.error("--since / --last only apply to --material")
+    if (args.since is not None or args.last is not None) and not (args.material or args.suite):
+        parser.error("--since / --last only apply to --material and --suite")
     if args.since is not None and args.last is not None:
         parser.error("pass --since or --last, not both")
     draw_fn = draw_material if args.material else draw_games if args.games else draw_loss if args.loss else draw
     if args.material:
         draw_fn = functools.partial(draw_material, since=args.since, last=args.last)
+    if args.suite:
+        draw_fn = functools.partial(draw_suite, buckets=args.buckets, smooth=args.smooth, since=args.since, last=args.last)
     agent_csv, agent_title = agent_paths(args.agent, args.loss, args.games or args.material) if args.agent else (None, None)
     if args.material and agent_title:
         agent_title = f"{args.agent} material vs ply"
+    if args.suite and args.agent:
+        agent_csv, agent_title = suite_csv(args.agent), f"{args.agent} eval suite"
     csv_path = Path(args.csv) if args.csv else agent_csv
     title = args.title or agent_title or csv_path.stem
     # same name as the CSV; the material plot gets its own suffix so it doesn't overwrite <agent>_games.png
     # a filtered plot gets its own name too, so it doesn't overwrite the full one
     window = f"_since{args.since}" if args.since is not None else f"_last{args.last}" if args.last is not None else ""
     out_path = csv_path.with_name(csv_path.stem + f"_material{window}.png") if args.material else csv_path.with_suffix(".png")
+    if args.suite:     # options in the name, so different views don't overwrite each other
+        options = (f"_{args.buckets}buckets" if args.buckets != 5 else "") +                   (f"_smooth{args.smooth}" if args.smooth > 1 else "")
+        out_path = csv_path.with_name(csv_path.stem + f"{options}{window}.png")
     try:
         if args.watch:
             watch(csv_path, title, out_path, args.interval, draw_fn)
