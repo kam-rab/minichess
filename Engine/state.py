@@ -7,7 +7,7 @@ from Engine.pieces import *
 # initial board state (string format)
 PIECE_TYPES = (('w', 'k'), ('w', 'q'), ('w', 'b'), ('w', 'n'), ('w', 'r'), ('w', 'p'), ('b', 'k'), ('b', 'q'), ('b', 'b'), ('b', 'n'), ('b', 'r'), ('b', 'p'))
 COLORS = ('w', 'b')
-STATE_INIT = "0!wbb(0, 2)bk(0, 0)bn(0, 3)bp(1, 0)(1, 1)(1, 2)(1, 3)(1, 4)bq(0, 1)br(0, 4)wb(4, 2)wk(4, 4)wn(4, 1)wp(3, 0)(3, 1)(3, 2)(3, 3)(3, 4)wq(4, 3)wr(4, 0)!1wbb(0, 2)bk(0, 0)bn(0, 3)bp(1, 0)(1, 1)(1, 2)(1, 3)(1, 4)bq(0, 1)br(0, 4)wb(4, 2)wk(4, 4)wn(4, 1)wp(3, 0)(3, 1)(3, 2)(3, 3)(3, 4)wq(4, 3)wr(4, 0)"
+STATE_INIT = "0!wbb(0, 2)bk(0, 4)bn(0, 1)bp(1, 0)(1, 1)(1, 2)(1, 3)(1, 4)bq(0, 3)br(0, 0)wb(4, 2)wk(4, 4)wn(4, 1)wp(3, 0)(3, 1)(3, 2)(3, 3)(3, 4)wq(4, 3)wr(4, 0)!1wbb(0, 2)bk(0, 4)bn(0, 1)bp(1, 0)(1, 1)(1, 2)(1, 3)(1, 4)bq(0, 3)br(0, 0)wb(4, 2)wk(4, 4)wn(4, 1)wp(3, 0)(3, 1)(3, 2)(3, 3)(3, 4)wq(4, 3)wr(4, 0)"
 
 
 class State:
@@ -15,20 +15,32 @@ class State:
         self.from_string(state)
 
 
-    def _create_board(self, pieces):
+    @staticmethod
+    def _create_board(pieces):
         ret = np.full((BOARD_SIZE, BOARD_SIZE), fill_value=None)
         for piece in pieces:
             ret[piece.pos] = piece
         return ret
 
-    
+
     def create_onehot_board(self):
-        ret = np.empty((300,))
+        board_area = BOARD_SIZE**2
+        ret = np.empty((12 * board_area,))
         i = 0
-        for piece_type in self._get_piece_types():
-            ret[i:i+25] = np.reshape(self.create_board(self.pieces[piece_type]), (-1, ))
-            i += 25
+        piece_types = self._get_piece_types()
+        if self.turn == 1:
+            piece_types = piece_types[6:] + piece_types[:6]
+        for piece_type in piece_types:
+            board = np.reshape(self._create_board(self.pieces[piece_type])[::2*(1-self.turn)-1], (-1, ))   # reverse board vertically for black's turn
+            ret[i:i+board_area] = (board != None)
+            i += board_area
         return ret
+
+
+    def create_leela_input(self):
+        one_hot_board = self.create_onehot_board()
+        extend = [self.move_number/160, 1 if self.history.get(self.board_to_string(False), 0) == 2 else 0]
+        return np.concatenate([one_hot_board, extend])
 
 
     def get_board(self):
@@ -213,7 +225,7 @@ class State:
             self.history[state] = self.history.get(state, 0) + 1
             if self.history[state] >= 3:
                 return "Draw by threefold repitition."
-                
+
         term = self.is_terminal(False)
         if term: 
             return term
@@ -334,7 +346,7 @@ class State:
                 history[state[1:]] = int(state[:1])
 
             self.history = history
-
+            
         
                 
                 

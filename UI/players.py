@@ -1,4 +1,4 @@
-"""Finds the agents in Agents/ that the UI can play against.
+"""Finds the agents in Agents/ (and its subfolders, e.g. Agents/AIs/) that the UI can play against.
 
 An agent module counts as playable if it defines either:
   * a class ``Agent`` whose instances have ``get_move(state) -> (from_sq, to_sq)``, or
@@ -21,11 +21,12 @@ def discover_agents():
     Calling a factory with no arguments returns an object with a ``get_move(state)`` method.
     """
     factories, errors = {}, {}
-    for path in sorted(AGENTS_DIR.glob("*.py")):
+    for path in sorted(AGENTS_DIR.rglob("*.py")):   # includes subfolders, e.g. Agents/AIs/
         if path.stem.startswith("_"):
             continue
+        rel = path.relative_to(AGENTS_DIR).with_suffix("")   # e.g. AIs/unregularized
         try:
-            module = importlib.import_module(f"Agents.{path.stem}")
+            module = importlib.import_module("Agents." + ".".join(rel.parts))
         except Exception as e:
             errors[path.stem] = f"{type(e).__name__}: {e}"
             traceback.print_exc()

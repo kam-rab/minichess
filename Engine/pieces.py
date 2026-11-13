@@ -51,13 +51,13 @@ class Piece:
 
 class King(Piece):
     def __init__(self, color, pos=None):
-        if not pos: pos = {"w": (4, 4), "b": (0, 0)}[color]
+        if not pos: pos = {"w": (4, 4), "b": (0, 4)}[color]
         super().__init__(color, "k", pos)
         self.moves = MOVES["k"]
 
 class Queen(Piece):
     def __init__(self, color, pos=None):
-        if not pos: pos = {"w": (4, 3), "b": (0, 1)}[color]
+        if not pos: pos = {"w": (4, 3), "b": (0, 3)}[color]
         super().__init__(color, "q", pos)
         self.moves = MOVES["q"]
 
@@ -69,13 +69,13 @@ class Bishop(Piece):
 
 class Knight(Piece):
     def __init__(self, color, pos=None):
-        if not pos: pos = {"w": (4, 1), "b": (0, 3)}[color]
+        if not pos: pos = {"w": (4, 1), "b": (0, 1)}[color]
         super().__init__(color, "n", pos)
         self.moves = MOVES["n"]
 
 class Rook(Piece):
     def __init__(self, color, pos=None):
-        if not pos: pos = {"w": (4, 0), "b": (0, 4)}[color]
+        if not pos: pos = {"w": (4, 0), "b": (0, 0)}[color]
         super().__init__(color, "r", pos)
         self.moves = MOVES["r"] 
     
