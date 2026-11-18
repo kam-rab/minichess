@@ -9,7 +9,7 @@ from Agents.AIs.l2 import Agent as l2
 from Agents.AIs.leela import Agent as leela
 
 if __name__=="__main__":
-    train(leela, resume_training=True, num_cycles=1501)
+    train(leela, resume_training=True, num_cycles=2001)
     
 
 """
