@@ -297,6 +297,20 @@ class ModelTree:
                     stack.extend(node.children)
         return layers
 
+
+    def update_lr(self, lr):
+        """Update learning rates for each Model object in the tree"""
+        stack = list(self.roots)
+        seen = []
+        while stack:
+            node = stack.pop()
+            if node not in seen:
+                seen.append(node)
+                node.model.learning_rate = lr
+                if node.children:
+                    stack.extend(node.children)
+
+
     def save(self, path):
         if not path[-4:] == ".npz": 
             path += ".npz"
@@ -308,11 +322,32 @@ class ModelTree:
         with np.load(path) as weight_data:
             layers = self.get_layer_type()
             assert len(layers) == len(weight_data.files)   # ensure same number of dense layers
-            
             for i in range(len(layers)):
                 weights = weight_data[f"arr_{i}"]
                 assert weights.shape == layers[i].weights.shape   # ensure same shape for each layer
                 layers[i].weights[...] = weights    # copy into existing array, so not pointing to file
+
+
+    def save_adam(self, path):
+        if not path[-4:] == ".npz": 
+            path += ".npz"
+        arrays = {}
+        for i, layer in enumerate(self.get_layer_type()):
+            arrays[f"m_{i}"], arrays[f"v_{i}"], arrays[f"t_{i}"] = layer.m, layer.v, np.array(layer.t)
+        np.savez(path, **arrays)
+
+    def load_adam(self, path):
+        if not path[-4:] == ".npz":
+            path += ".npz"
+        with np.load(path) as data:
+            layers = self.get_layer_type()
+            assert len(layers) * 3 == len(data.files)       # m, v, t per dense layer
+            for i, layer in enumerate(layers):
+                assert data[f"m_{i}"].shape == layer.m.shape and data[f"v_{i}"].shape == layer.v.shape
+                layer.m = data[f"m_{i}"].copy()
+                layer.v = data[f"v_{i}"].copy()
+                layer.t = int(data[f"t_{i}"])
+                
 
 
 

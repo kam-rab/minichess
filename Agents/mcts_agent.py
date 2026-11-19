@@ -12,6 +12,7 @@ class MCTSAgent:
     Wrapper class for all AI agents, who each use MCTS search.
     """
     CHECKPOINT_DIR = None       # each child sets for their own path
+    ADAM_PATH = None
     RELEASE_WEIGHTS = None      # ^
     CREATE_BOARD = staticmethod(State.create_onehot_board)     # network input; children with a different input override it
 

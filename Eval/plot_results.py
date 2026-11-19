@@ -11,6 +11,7 @@ Run from the repo root:
     python -m Eval.plot_results --agent l2 --material        # material vs ply scatter from the game log, by result / draw type
     python -m Eval.plot_results --agent leela --suite        # eval suite (Eval/eval_suite.py): score by opponent and Q bucket
     python -m Eval.plot_results --agent leela --suite --buckets 3 --smooth 2 --since 500
+    python -m Eval.plot_results --agent leela --judge        # each checkpoint's own Q of the eval positions
     python -m Eval.plot_results --agent l2 --watch           # redraw every 30 s while training runs
     python -m Eval.plot_results --agent l2 --loss --watch --interval 10
     python -m Eval.plot_results --csv path/to/file.csv --title "Some title"   # any CSV (add --loss for a loss CSV)
@@ -425,7 +426,14 @@ def _legend_off_right(ax, **kwargs):
     """Place the legend at whichever of LEGEND_SPOTS covers the fewest plotted points (like loc="best", minus the right side)."""
     fig = ax.figure
     renderer = fig.canvas.get_renderer() if hasattr(fig.canvas, "get_renderer") else fig._get_renderer()
-    points = [line.get_transform().transform(line.get_xydata()) for line in ax.lines if len(line.get_xydata())]
+    points = []
+    for line in ax.lines:
+        xy = line.get_transform().transform(np.asarray(line.get_xydata(), dtype=float))
+        xy = xy[np.isfinite(xy).all(axis=1)]
+        if len(xy) > 1:         # sample along each segment too, so a line passing under the legend counts
+            t = np.linspace(0, 1, 20)[:, None, None]
+            xy = (xy[:-1] + t * (xy[1:] - xy[:-1])).reshape(-1, 2)
+        points.append(xy)
     points = np.concatenate(points) if points else np.empty((0, 2))
     best, best_cover = LEGEND_SPOTS[0], None
     for spot in LEGEND_SPOTS:
@@ -542,7 +550,123 @@ def suite_csv(agent):
     return found[-1]
 
 
-FIGSIZES = {draw_games: (14, 8), draw_material: (20, 11), draw_suite: (17, 11)}     # anything else: (9, 7)
+# ---------------------------------------------------------------- judging (the model's own view of the eval positions)
+
+JUDGE_BUCKETS = [   # (name, test on the reference Q from White's view, color); same colors as the suite buckets
+    ("Black winning", lambda q: q < -0.5, "#c62828"),
+    ("Black better", lambda q: -0.5 <= q < -0.2, "#ef9a9a"),
+    ("balanced", lambda q: abs(q) <= 0.2, "#616161"),
+    ("White better", lambda q: 0.2 < q <= 0.5, "#81c784"),
+    ("White winning", lambda q: q > 0.5, "#2e7d32"),
+]
+
+
+def _judge_bucket(q_ref):
+    return next(name for name, test, _ in JUDGE_BUCKETS if test(q_ref))
+
+
+def draw_judge(fig, csv_path, title, since=None, last=None):
+    """
+    Clear fig and draw how each checkpoint judges the fixed eval positions (Eval/eval_suite.py judge_checkpoint):
+        top left:    mean search Q per bucket, +-1 standard error band; dashed: the reference model's mean for that bucket
+        bottom left: the same for the raw value head (no search)
+        right:       search Q of every position over cycles, positions sorted by the reference Q
+    Buckets come from the reference Q (the model that scored the positions), White's view.
+    """
+    with open(csv_path, newline="") as f:
+        rows = list(csv.DictReader(f))
+    for r in rows:
+        r["cycle"] = int(r["cycle"])
+        r["position"] = int(r["position"])
+        for k in ("q_ref", "q", "v_net"):
+            r[k] = float(r[k])
+        r["bucket"] = _judge_bucket(r["q_ref"])
+    if last is not None and rows:
+        since = max(r["cycle"] for r in rows) - last + 1
+    if since is not None:
+        rows = [r for r in rows if r["cycle"] >= since]
+    ref = Path(csv_path).stem.split("_judge_")[-1]          # e.g. gen_1000
+    ref_cycle = int(ref.split("_")[1]) if ref.startswith("gen_") and ref.split("_")[1].isdigit() else None
+
+    fig.clear()
+    grid = fig.add_gridspec(2, 2, width_ratios=[1.25, 1])
+    ax_q = fig.add_subplot(grid[0, 0])
+    ax_v = fig.add_subplot(grid[1, 0], sharex=ax_q, sharey=ax_q)
+    ax_map = fig.add_subplot(grid[:, 1])
+    if not rows:
+        for ax in (ax_q, ax_v, ax_map):
+            ax.text(0.5, 0.5, "no judgings yet", ha="center", va="center", transform=ax.transAxes, color="gray")
+        fig.suptitle(title)
+        return
+    cycles = sorted({r["cycle"] for r in rows})
+    by_cycle = {c: [r for r in rows if r["cycle"] == c] for c in cycles}
+
+    for ax, key, label in ((ax_q, "q", "search Q"), (ax_v, "v_net", "raw value head")):
+        for name, _, color in JUDGE_BUCKETS:
+            b_rows = [r for r in rows if r["bucket"] == name]
+            if not b_rows:
+                continue
+            stats = []
+            for c in cycles:
+                x = np.array([r[key] for r in by_cycle[c] if r["bucket"] == name])
+                stats.append((x.mean(), x.std() / np.sqrt(len(x)) if len(x) > 1 else np.nan) if len(x) else (np.nan, np.nan))
+            mean, se = np.array(stats).T
+            n = len(b_rows) // len(cycles)
+            ax.fill_between(cycles, mean - se, mean + se, color=color, alpha=0.2, lw=0)
+            ax.plot(cycles, mean, marker="o", ms=3, color=color, label=f"{name} ({n} positions)")
+            ax.axhline(np.mean([r["q_ref"] for r in b_rows]), linestyle="--", color=color, lw=1)
+        if ref_cycle is not None and cycles[0] <= ref_cycle <= cycles[-1]:
+            ax.axvline(ref_cycle, color="gray", lw=1, linestyle=":")
+        ax.axhline(0, color="gray", lw=0.5)
+        ax.set_ylim(-1, 1)
+        ax.set_ylabel(f"{label} (White's view)\nmean per bucket, ±1 SE")
+        _legend_off_right(ax, fontsize=7)
+    ax_q.set_title(f"Search Q (dashed: {ref}'s mean per bucket)", fontsize=11)
+    ax_v.set_title("Raw value head, no search", fontsize=11)
+    ax_v.set_xlabel("Training cycle")
+    plt.setp(ax_q.get_xticklabels(), visible=False)
+
+    # heatmap: one row per position, sorted by the reference Q (Black winning at the bottom)
+    positions = sorted({r["position"]: r["q_ref"] for r in rows}.items(), key=lambda p: p[1])
+    row_of = {p: i for i, (p, _) in enumerate(positions)}
+    grid_q = np.full((len(positions), len(cycles)), np.nan)
+    for j, c in enumerate(cycles):
+        for r in by_cycle[c]:
+            grid_q[row_of[r["position"]], j] = r["q"]
+    x = np.array(cycles, dtype=float)
+    mids = (x[:-1] + x[1:]) / 2
+    step = np.diff(x).min() if len(x) > 1 else 50
+    x_edges = np.concatenate([[x[0] - step / 2], mids, [x[-1] + step / 2]])
+    mesh = ax_map.pcolormesh(x_edges, np.arange(len(positions) + 1), grid_q, cmap="RdYlGn", vmin=-1, vmax=1)
+    fig.colorbar(mesh, ax=ax_map, label="search Q (White's view)", fraction=0.05, pad=0.02)
+    # bucket boundaries and labels
+    names = [_judge_bucket(q) for _, q in positions]
+    starts = [i for i in range(len(names)) if i == 0 or names[i] != names[i - 1]]
+    for i in starts[1:]:
+        ax_map.axhline(i, color="black", lw=0.8)
+    ends = starts[1:] + [len(names)]
+    ax_map.set_yticks([(s + e) / 2 for s, e in zip(starts, ends)])
+    ax_map.set_yticklabels([names[s] for s in starts], fontsize=8)
+    if ref_cycle is not None and cycles[0] <= ref_cycle <= cycles[-1]:
+        ax_map.axvline(ref_cycle, color="black", lw=1, linestyle=":")
+    ax_map.set_xlabel("Training cycle")
+    ax_map.set_title(f"Every position's search Q\n(rows sorted by {ref}'s Q)", fontsize=11)
+
+    window = f", newest {last} cycles" if last is not None else f", cycle {since} on" if since is not None else ""
+    sims = rows[0].get("sims", "")
+    fig.suptitle(f"{title}\n({len(positions)} positions, buckets by {ref}'s Q, {sims} sims, {len(cycles)} judgings{window})")
+    _tight_layout_wrapped(fig)
+
+
+def judge_csv(agent):
+    """The agent's judging CSV (Eval/training/<agent>/<agent>_judge_<checkpoint>.csv), the newest if there are several."""
+    found = sorted((RESULTS_DIR / agent).glob(f"{agent}_judge_*.csv"), key=lambda p: p.stat().st_mtime)
+    if not found:
+        raise FileNotFoundError(f"no {agent}_judge_*.csv in {RESULTS_DIR / agent}; run Eval/eval_suite.py first")
+    return found[-1]
+
+
+FIGSIZES = {draw_games: (14, 8), draw_material: (20, 11), draw_suite: (17, 11), draw_judge: (17, 10)}     # anything else: (9, 7)
 
 
 def _figsize(draw_fn):
@@ -592,6 +716,7 @@ if __name__ == "__main__":
     parser.add_argument("--games", action="store_true", help="plot the self-play game log instead of W/D/L")
     parser.add_argument("--material", action="store_true", help="plot material vs ply from the game log")
     parser.add_argument("--suite", action="store_true", help="plot the eval suite results (Eval/eval_suite.py)")
+    parser.add_argument("--judge", action="store_true", help="plot how each checkpoint judges the eval positions (Eval/eval_suite.py)")
     parser.add_argument("--buckets", type=int, choices=[3, 5], default=5, help="--suite: Q buckets in the middle row")
     parser.add_argument("--smooth", type=int, default=1, help="--suite: pool each eval with the N - 1 before it")
     parser.add_argument("--since", type=int, default=None, help="--material / --suite: only from this cycle on")
@@ -606,8 +731,8 @@ if __name__ == "__main__":
         available = sorted(p.name for p in RESULTS_DIR.iterdir() if p.is_dir()) if RESULTS_DIR.exists() else []
         parser.error(f"pass --agent (available: {', '.join(available) or 'none yet'}) or --csv")
 
-    if (args.since is not None or args.last is not None) and not (args.material or args.suite):
-        parser.error("--since / --last only apply to --material and --suite")
+    if (args.since is not None or args.last is not None) and not (args.material or args.suite or args.judge):
+        parser.error("--since / --last only apply to --material, --suite and --judge")
     if args.since is not None and args.last is not None:
         parser.error("pass --since or --last, not both")
     draw_fn = draw_material if args.material else draw_games if args.games else draw_loss if args.loss else draw
@@ -620,6 +745,10 @@ if __name__ == "__main__":
         agent_title = f"{args.agent} material vs ply"
     if args.suite and args.agent:
         agent_csv, agent_title = suite_csv(args.agent), f"{args.agent} eval suite"
+    if args.judge:
+        draw_fn = functools.partial(draw_judge, since=args.since, last=args.last)
+        if args.agent:
+            agent_csv, agent_title = judge_csv(args.agent), f"{args.agent}: its own view of the eval positions"
     csv_path = Path(args.csv) if args.csv else agent_csv
     title = args.title or agent_title or csv_path.stem
     # same name as the CSV; the material plot gets its own suffix so it doesn't overwrite <agent>_games.png
@@ -629,6 +758,8 @@ if __name__ == "__main__":
     if args.suite:     # options in the name, so different views don't overwrite each other
         options = (f"_{args.buckets}buckets" if args.buckets != 5 else "") +                   (f"_smooth{args.smooth}" if args.smooth > 1 else "")
         out_path = csv_path.with_name(csv_path.stem + f"{options}{window}.png")
+    if args.judge:
+        out_path = csv_path.with_name(csv_path.stem + f"{window}.png")
     try:
         if args.watch:
             watch(csv_path, title, out_path, args.interval, draw_fn)

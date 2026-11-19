@@ -24,10 +24,20 @@ From the training loop (on its existing Pool), after saving gen_{cycle}:
 Standalone, over saved checkpoints (from the repo root):
     python -m Eval.eval_suite --agent leela
     python -m Eval.eval_suite --agent leela --from 50 --to 1000 --greedy-every 50 --fixed-gen 1000 --moving-gap 100
+Only the judging, over saved checkpoints (the matchups turned off):
+    python -m Eval.eval_suite --agent leela --greedy-every 0 --fixed-every 0 --moving-every 0
 Summarize what's in the CSV (score and score - expected per bucket):
     python -m Eval.eval_suite --agent leela --summary
 
 Matchups already in the CSV are skipped, so reruns (or a resumed training run) never play one twice.
+
+Judging (every judge_every cycles): the checkpoint also scores every eval position itself, with the same search
+the positions were scored with (the book's sims), so its view can be followed over training. One row per position
+in <agent>_judge_<scoring checkpoint>.csv:
+    q_ref   the scoring model's Q (from the book), White's view
+    q       this checkpoint's search Q (most visited move, as the book), White's view
+    v_net   this checkpoint's raw value head on the position (no search), White's view
+At the scoring checkpoint itself, q == q_ref (same search, no noise). Judgings already in the CSV are skipped too.
 """
 
 import os
@@ -55,6 +65,8 @@ MOVING_EVERY = 100
 GREEDY_POSITIONS = 25   # positions per opponent (each played from both sides); None = all of them
 FIXED_POSITIONS = 50
 MOVING_POSITIONS = 50
+JUDGE_EVERY = 50        # the checkpoint scores every position itself (0 / None turns it off)
+JUDGE_SIMS = None       # None = the sims the positions were scored with, so q is comparable to q_ref
 
 WORKERS = 6             # standalone runs only; the training loop passes its own Pool
 POSITIONS_DIR = Path(__file__).resolve().parent / "eval_positions"
@@ -65,6 +77,7 @@ BUCKETS = ["losing", "worse", "balanced", "better", "winning"]
 FIELDS = ["cycle", "opponent", "opponent_checkpoint", "position", "source", "ply", "q_white", "model_white",
           "q_model", "bucket", "expected", "result", "plies"]
 Q_BIN_NAMES = ["balanced", "better", "winning"]     # |Q| bins of the saved positions (Eval/eval_positions.py)
+JUDGE_FIELDS = ["cycle", "position", "source", "ply", "q_ref", "q", "v_net", "sims"]
 
 
 def bucket(q_model):
@@ -88,6 +101,12 @@ def default_csv(agent_cls, positions_path):
     """Eval/training/<agent>/<agent>_suite_<scoring checkpoint>.csv: one results file per position set."""
     name = agent_cls.CHECKPOINT_DIR.name
     return RESULTS_DIR / name / f"{name}_suite_{Path(load_book(positions_path)['checkpoint']).stem}.csv"
+
+
+def default_judge_csv(agent_cls, positions_path):
+    """Eval/training/<agent>/<agent>_judge_<scoring checkpoint>.csv"""
+    name = agent_cls.CHECKPOINT_DIR.name
+    return RESULTS_DIR / name / f"{name}_judge_{Path(load_book(positions_path)['checkpoint']).stem}.csv"
 
 
 def subset_positions(book, n):
@@ -190,6 +209,29 @@ def _play(args):
             return task_id, (result if model_white else -result), plies
 
 
+def _judge(args):
+    """Score one position with the model. Returns (task id, search Q, raw value head), both White's view.
+    The search Q is taken as in Eval/eval_positions.py: Q of the most visited move, or +-1 if a result is proven."""
+    import numpy as np
+    from Model.util import create_mask
+
+    task_id, model_cls, model_path, moves, sims = args
+    agent = _agent(model_cls, model_path)
+    agent.mcts.reset()
+    state = opening_state(moves)
+    agent.mcts.calculate_move(state, agent.model, False, agent.CREATE_BOARD, num_simulations=sims)
+    root = agent.mcts.root
+    if getattr(root, "proven", None) is not None:
+        q = float(root.proven * root.color)
+    else:
+        best = int(np.argmax(root.children_visits))
+        q = float(root.children_values[best] / root.children_visits[best] * root.color)
+    out = agent.model.forward(agent.CREATE_BOARD(state).reshape(1, -1), mask=create_mask(root.moves).reshape(1, -1))
+    v_net = float(out[1][0, 0] * root.color)
+    agent.mcts.reset()
+    return task_id, q, v_net
+
+
 # ---------------------------------------------------------------- matchups
 
 def play_matchup(pool, model_cls, model_path, opp_cls, opp_path, positions, indices=None):
@@ -238,10 +280,40 @@ def due_matchups(agent_cls, cycle, greedy_every=GREEDY_EVERY, fixed_gen=FIXED_GE
     return found
 
 
+def judge_checkpoint(pool, agent_cls, cycle, positions_path, csv_path, sims=JUDGE_SIMS):
+    """
+    gen_{cycle} scores every eval position (search Q and raw value head, see the module docstring); the rows are
+    appended to csv_path. sims=None uses the book's sims. Skipped if this cycle is already in the CSV.
+    Returns the rows written ([] if skipped).
+    """
+    import numpy as np
+
+    csv_path = Path(csv_path)
+    if cycle in _judged(csv_path):
+        return []
+    book = load_book(positions_path)
+    positions = book["openings"]
+    sims = sims or book["sims"]
+    model_path = str(_ckpt(agent_cls, cycle))
+    start = time.time()
+    tasks = [(i, agent_cls, model_path, pos["moves"], sims) for i, pos in enumerate(positions)]
+    rows = [None] * len(tasks)
+    for i, q, v_net in pool.imap_unordered(_judge, tasks):
+        pos = positions[i]
+        rows[i] = {"cycle": cycle, "position": i, "source": pos.get("source", ""), "ply": pos.get("ply", ""),
+                   "q_ref": pos["q"], "q": round(q, 3), "v_net": round(v_net, 3), "sims": sims}
+    _append(csv_path, rows, JUDGE_FIELDS)
+    q, q_ref = np.array([r["q"] for r in rows]), np.array([r["q_ref"] for r in rows])
+    print(f"gen_{cycle:03d} judged {len(rows)} positions: corr with {Path(book['checkpoint']).stem} {np.corrcoef(q, q_ref)[0, 1]:.2f}, "
+          f"mean |q - q_ref| {np.mean(np.abs(q - q_ref)):.2f}   ({time.time() - start:.0f}s)", flush=True)
+    return rows
+
+
 def eval_checkpoint(pool, agent_cls, cycle, positions_path=None, csv_path=None,
                     greedy_every=GREEDY_EVERY, fixed_gen=FIXED_GEN, fixed_every=FIXED_EVERY,
                     moving_gap=MOVING_GAP, moving_every=MOVING_EVERY,
-                    greedy_positions=GREEDY_POSITIONS, fixed_positions=FIXED_POSITIONS, moving_positions=MOVING_POSITIONS):
+                    greedy_positions=GREEDY_POSITIONS, fixed_positions=FIXED_POSITIONS, moving_positions=MOVING_POSITIONS,
+                    judge_every=JUDGE_EVERY, judge_sims=JUDGE_SIMS, judge_csv_path=None):
     """
     Play whichever matchups are due for gen_{cycle} of agent_cls (see due_matchups), append each to the CSV
     and print a one-line score for it. Matchups already in the CSV are skipped.
@@ -249,13 +321,21 @@ def eval_checkpoint(pool, agent_cls, cycle, positions_path=None, csv_path=None,
     with the same mix as the whole set (subset_positions); None = all.
     positions_path: eval positions file (default: default_positions(agent_cls, fixed_gen)).
     csv_path: results file (default: default_csv(agent_cls, positions_path)).
+    judge_every: every this many cycles the checkpoint also scores all the positions itself (judge_checkpoint),
+    with judge_sims (None = the book's), into judge_csv_path (default: default_judge_csv). 0 / None turns it off.
     Returns {opponent name: (wins, draws, losses)} for the matchups played.
     """
     model_path = _ckpt(agent_cls, cycle)
     due = due_matchups(agent_cls, cycle, greedy_every, fixed_gen, fixed_every, moving_gap, moving_every)
-    if not due:
+    judge_due = bool(judge_every) and cycle > 0 and cycle % judge_every == 0
+    if not due and not judge_due:
         return {}
     positions_path = positions_path or default_positions(agent_cls, fixed_gen if fixed_gen is not None else FIXED_GEN)
+    if judge_due:
+        judge_checkpoint(pool, agent_cls, cycle, positions_path,
+                         judge_csv_path or default_judge_csv(agent_cls, positions_path), judge_sims)
+    if not due:
+        return {}
     csv_path = Path(csv_path) if csv_path else default_csv(agent_cls, positions_path)
     book = load_book(positions_path)
     positions = book["openings"]
@@ -289,12 +369,19 @@ def _done(csv_path):
         return {(int(r["cycle"]), r["opponent"]) for r in csv.DictReader(f)}
 
 
-def _append(csv_path, rows):
+def _judged(csv_path):
+    if not Path(csv_path).exists():
+        return set()
+    with open(csv_path, newline="") as f:
+        return {int(r["cycle"]) for r in csv.DictReader(f)}
+
+
+def _append(csv_path, rows, fields=FIELDS):
     csv_path = Path(csv_path)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     new = not csv_path.exists()
     with open(csv_path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS)
+        writer = csv.DictWriter(f, fieldnames=fields)
         if new:
             writer.writeheader()
         writer.writerows(rows)
@@ -354,6 +441,8 @@ if __name__ == "__main__":
     parser.add_argument("--greedy-positions", type=int, default=GREEDY_POSITIONS, help="positions vs greedy (each played from both sides)")
     parser.add_argument("--fixed-positions", type=int, default=FIXED_POSITIONS)
     parser.add_argument("--moving-positions", type=int, default=MOVING_POSITIONS)
+    parser.add_argument("--judge-every", type=int, default=JUDGE_EVERY, help="the checkpoint scores every position itself; 0 turns it off")
+    parser.add_argument("--judge-sims", type=int, default=JUDGE_SIMS, help="default: the sims the positions were scored with")
     parser.add_argument("--positions", default=None, help="eval positions file (default: Eval/eval_positions/<agent>_gen_<fixed-gen>.json)")
     parser.add_argument("--csv", default=None, help="results CSV (default: Eval/training/<agent>/<agent>_suite_<scoring checkpoint>.csv)")
     parser.add_argument("--summary", action="store_true", help="print the per-bucket table from the CSV instead of playing")
@@ -367,4 +456,5 @@ if __name__ == "__main__":
         run(agent_cls, args.first, args.last, positions_path=positions, csv_path=args.csv,
             greedy_every=args.greedy_every, fixed_gen=args.fixed_gen, fixed_every=args.fixed_every,
             moving_gap=args.moving_gap, moving_every=args.moving_every, greedy_positions=args.greedy_positions,
-            fixed_positions=args.fixed_positions, moving_positions=args.moving_positions)
+            fixed_positions=args.fixed_positions, moving_positions=args.moving_positions,
+            judge_every=args.judge_every, judge_sims=args.judge_sims)

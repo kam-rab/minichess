@@ -14,6 +14,8 @@ NUM_GAMES_BEFORE_TRAINING = 50
 TRAINING_STEPS_PER_CYCLE = 200
 NUM_CYCLES = 1001
 
+LR_SCHEDULE = [(0, 1e-3), (2475, 3e-4), (3500, 1e-4)]
+
 # endgame starts: some games start from endgame positions reached in earlier self-play games
 ENDGAME_FRACTION = 0.25         # share of each cycle's games started from a saved endgame position
 ENDGAME_POOL_SIZE = 2000        # oldest positions drop out, so the pool follows the current agent
@@ -24,14 +26,17 @@ NUM_EVAL_GAMES = 50
 NUM_CYCLES_BEFORE_EVAL = 25
 EVAL_RESULTS_DIR = Path(__file__).resolve().parent.parent / "Eval" / "training"
 
-WORKERS = 6     # run more cores on my machine to generate self_play data
+NUM_WORKERS = 6     # run more cores on my machine to generate self_play data
 
 
-def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES):
+def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES, workers=NUM_WORKERS, lr_schedule = LR_SCHEDULE):
     """
     Training loop for each AI agent. Run from main.py, passing in agent object. 
     """
     trainee = agent_class(load_checkpoint=resume_training)
+    adam_path = agent_class.ADAM_PATH       # load saved adam if they exist for faster/better training
+    if resume_training and adam_path is not None and adam_path.exists():
+        trainee.model.load_adam(str(adam_path))
     has_moves_left = len(trainee.model.leaves) > 2      # leela
     x_dim = trainee.model.get_layer_type()[0].weights.shape[0] - 1    # get x dim from model - bias row
 
@@ -63,9 +68,12 @@ def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES):
 
 
     # start cycle with workers generating self play games and running evals
-    with Pool(WORKERS) as pool:
+    with Pool(workers) as pool:
         for cycle in range(start, num_cycles):
-            print("CYCLE: ", cycle)
+            # update the learning rate according to the schedule
+            lr = [lr for start, lr in lr_schedule if cycle >= start][-1]
+            trainee.model.update_lr(lr)
+            print("CYCLE: ", cycle, " // LEARNING RATE: ", lr)
 
             trainee.model.save(str(LATEST))          # publish current weights to the workers
             cycle_split = [0, 0, 0]
@@ -108,6 +116,8 @@ def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES):
 
             # save checkpoint
             trainee.model.save(str(agent_class.CHECKPOINT_DIR / f"gen_{cycle:03d}.npz"))
+            if agent_class.ADAM_PATH is not None:
+                trainee.model.save_adam(str(agent_class.ADAM_PATH))
             ring_buffer.save(str(BUFFER_PATH))  
             np.save(ENDGAME_POOL_PATH, np.array(endgame_pool, dtype=str))
             append_loss_row(LOSS_CSV, cycle, losses[0], losses[1], ce_floor, *losses[2:])

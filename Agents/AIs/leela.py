@@ -16,6 +16,7 @@ class Agent(MCTSAgent):
     """
     CHECKPOINT_DIR = REPO_ROOT / "Training" / "Checkpoints" / "leela"
     RELEASE_WEIGHTS = Path(__file__).resolve().parent / "Weights" / "leela.npz"
+    ADAM_PATH = REPO_ROOT / "Training" / "Checkpoints" / "leela" / "Adam.npz"
     CREATE_BOARD = staticmethod(State.create_leela_input)     # board + move counter + repetition flag (302 inputs)
 
 
