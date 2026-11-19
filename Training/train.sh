@@ -20,7 +20,7 @@
 #     pip install numpy
 
 PROJECT=$HOME/minichess
-NUM_CYCLES=3501                         # cycle to stop at (not how many to run); training resumes from the latest checkpoint
+NUM_CYCLES=4001                         # cycle to stop at (not how many to run); training resumes from the latest checkpoint
 WORKERS=$((SLURM_CPUS_PER_TASK - 1))
 
 # one BLAS thread per process, so 24 workers don't oversubscribe the cores

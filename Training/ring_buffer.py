@@ -1,5 +1,8 @@
 import numpy as np 
 
+# total buffer capacity
+CAPACITY = 80000
+
 # default for current game (leela)
 X_DIM = 302
 PI_DIM = 625
@@ -11,7 +14,7 @@ class RingBuffer:
     A class to hold buffers for X, pi, and v from self play games to be used for training
     """
 
-    def __init__(self, capacity=40000, x_dim=X_DIM, pi_dim=PI_DIM, v_dim=V_DIM): 
+    def __init__(self, capacity=CAPACITY, x_dim=X_DIM, pi_dim=PI_DIM, v_dim=V_DIM): 
         self.X = np.empty((capacity, x_dim), dtype=np.float32)  
         self.pi = np.empty((capacity, pi_dim), dtype=np.float32) 
         self.v = np.empty((capacity, v_dim), dtype = np.float32)
@@ -52,6 +55,9 @@ class RingBuffer:
     def load(self, path):
         with np.load(path) as d:
             n = d["X"].shape[0]
-            self.X[:n], self.pi[:n], self.v[:n], self.masks[:n], self.moves_left[:n] = d["X"], d["pi"], d["v"], d["masks"], d["moves_left"]
-            self.size = n
-            self.index = int(d["index"])
+            shift = int(d["index"]) % n                   # oldest entry first (does nothing if  old buffer wasn't full)
+            keep = min(n, self.capacity)                   # if the new buffer is smaller, keep the newest
+            for name, arr in (("X", self.X), ("pi", self.pi), ("v", self.v), ("masks", self.masks), ("moves_left", self.moves_left)):
+                arr[:keep] = np.roll(d[name], -shift, axis=0)[n - keep:]    # populate all arrs in ring buffer
+            self.size = keep
+            self.index = keep % self.capacity

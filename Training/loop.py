@@ -10,11 +10,11 @@ from Agents.greedy_material import Agent as Greedy
 
 
 # training hyperparams
-NUM_GAMES_BEFORE_TRAINING = 50
+NUM_GAMES_BEFORE_TRAINING = 100
 TRAINING_STEPS_PER_CYCLE = 200
 NUM_CYCLES = 1001
 
-LR_SCHEDULE = [(0, 1e-3), (2475, 3e-4), (3500, 1e-4)]
+LR_SCHEDULE = [(0, 1e-3), (2475, 3e-4), (4000, 1e-4)]
 
 # endgame starts: some games start from endgame positions reached in earlier self-play games
 ENDGAME_FRACTION = 0.25         # share of each cycle's games started from a saved endgame position
