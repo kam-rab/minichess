@@ -3,14 +3,14 @@ Self-play games run inside worker processes.
 
 Nothing here is tied to a specific agent: the agent class is passed in with each task. It must follow
 the MCTSAgent interface: cls(load_checkpoint=False), agent.model.load(path), and
-agent.get_move(state, training=True) -> (move, (X, pi, color, mask)).
+agent.get_move(state, training=True) -> (move, (X, pi, color, mask, q)).
 
 Each worker process keeps one agent per class and reloads its weights from disk whenever the
 trainer publishes a new version, so all workers play with the trainer's current network.
 
 Usage (from the trainer):
     with Pool(WORKERS) as pool:
-        for X, pi, v, moves_left, mask, term, stats in self_play_games(pool, AgentClass, weights_path, version, n_games, seed_base, starts):
+        for X, pi, v, moves_left, mask, q, term, stats in self_play_games(pool, AgentClass, weights_path, version, n_games, seed_base, starts):
             ...
 """
 
@@ -47,11 +47,12 @@ def play_game(args):
             reproducible later by seeding that RNG with it
         start: State string to start from (e.g. a saved endgame position), or None for the normal opening
 
-    Returns (X, pi, v, moves_left, mask, term, stats):
+    Returns (X, pi, v, moves_left, mask, q, term, stats):
         X: (k, input size) network inputs (300 for one-hot boards, 302 for Leela), pi: (k, 625) visit distributions,
         v: (k, 1) outcomes from the side to move's perspective,
         moves_left: (k, 1) plies left in the game from each position, divided by MAX_PLIES (target for a moves-left head),
-        mask: (k, 625) legal moves, term: +1/0/-1 from White's view,
+        mask: (k, 625) legal moves, q: (k, 1) root search Q from the side to move's perspective,
+        term: +1/0/-1 from White's view,
         stats: dict summarizing the game (see _game_stats)
     """
     agent_cls, weights_path, version, seed, start = args
@@ -59,7 +60,7 @@ def play_game(args):
     agent.mcts.reset()                      # don't carry the previous game's search tree into this one
 
     game = State(start) if start else State()
-    X, pi, color, mask = [], [], [], []
+    X, pi, color, mask, q = [], [], [], [], []
     materials, piece_counts = [], []        # per position, for the game stats
     endgame_start = None                    # first endgame position reached, saved as a possible start position
     while True:
@@ -70,11 +71,12 @@ def play_game(args):
         if start is None and endgame_start is None and n_pieces <= START_POS_PIECES and stable:   # only save from normal games
             endgame_start = {"state": game.state_to_string(), "material": mat, "pieces": n_pieces, "ply": game.move_number}
 
-        move, (x, p, c, m) = agent.get_move(game, training=True)
+        move, (x, p, c, m, root_q) = agent.get_move(game, training=True)
         X.append(x)
         pi.append(p)
         color.append(c)
         mask.append(m)
+        q.append(root_q)
 
         end = game.play_move(move)
         term = terminal_value(end)
@@ -85,7 +87,7 @@ def play_game(args):
             stats = _game_stats(term, end, materials, piece_counts, _material(game))
             stats["endgame_start"] = endgame_start
             stats["start"] = "endgame" if start else "normal"
-            return np.stack(X), np.stack(pi), v, moves_left, np.stack(mask), term, stats
+            return np.stack(X), np.stack(pi), v, moves_left, np.stack(mask), np.array(q, dtype=np.float32).reshape(-1, 1), term, stats
 
 
 MAX_PLIES = 160         # the 80-move rule: no game lasts longer, so moves_left targets are in (0, 1]

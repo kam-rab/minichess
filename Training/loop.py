@@ -84,15 +84,15 @@ def train(agent_class, resume_training=False, num_cycles=NUM_CYCLES, workers=NUM
             picks = rng.choice(len(endgame_pool), n_end, replace=False) if n_end else []
             starts = [None] * (NUM_GAMES_BEFORE_TRAINING - n_end) + [str(endgame_pool[i]) for i in picks]
 
-            for X, pi, v, moves_left, mask, term, stats in self_play_games(pool, agent_class, str(LATEST), cycle, NUM_GAMES_BEFORE_TRAINING, cycle * 100_000, starts):
-                ring_buffer.add(X, pi, v, mask, moves_left=moves_left)
+            for X, pi, v, moves_left, mask, q, term, stats in self_play_games(pool, agent_class, str(LATEST), cycle, NUM_GAMES_BEFORE_TRAINING, cycle * 100_000, starts):
+                ring_buffer.add(X, pi, v, mask, moves_left=moves_left, q=q)
                 cycle_split[term + 1] += 1
                 cycle_stats.append(stats)
                 if stats["endgame_start"] is not None:          # only normal games save one
                     endgame_pool.append(stats["endgame_start"]["state"])
             endgame_pool = endgame_pool[-ENDGAME_POOL_SIZE:]
 
-            training_data = ring_buffer.get_data(has_moves_left)
+            training_data = ring_buffer.get_data(has_moves_left, q=True)     # value target (z + q) / 2
             losses = [trainee.train(*training_data, return_loss=True) for _ in range(TRAINING_STEPS_PER_CYCLE)]
             losses = np.mean(losses, axis=0)
 

@@ -244,7 +244,7 @@ class MCTS:
         if training:
             pi = np.zeros((BOARD_SIZE**4,))
             pi[self.root.moves] = self.root.children_visits / self.root.children_visits.sum()   # train to estimate MCTS visit counts
-            return decode(self.root.moves[a], state.turn), (X, pi, self.root.color, legal_moves)
+            return decode(self.root.moves[a], state.turn), (X, pi, self.root.color, legal_moves, self.root.children_values.sum() / self.root.children_visits.sum())
 
         return decode(self.root.moves[a], state.turn)    
 

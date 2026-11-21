@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --account=b1229
 #SBATCH --partition=b1229               # buy-in allocations usually use their own partition; check with: sinfo -p b1229
-#SBATCH --time=08:00:00                 # few hrs expected; extra headroom. If it's killed, resubmitting resumes from the last checkpoint
+#SBATCH --time=10:00:00                 # few hrs expected; extra headroom. If it's killed, resubmitting resumes from the last checkpoint
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=25              # 24 self-play/eval workers + 1 main process (training, saving)
@@ -20,7 +20,7 @@
 #     pip install numpy
 
 PROJECT=$HOME/minichess
-NUM_CYCLES=4001                         # cycle to stop at (not how many to run); training resumes from the latest checkpoint
+NUM_CYCLES=6001                         # cycle to stop at (not how many to run); training resumes from the latest checkpoint
 WORKERS=$((SLURM_CPUS_PER_TASK - 1))
 
 # one BLAS thread per process, so 24 workers don't oversubscribe the cores

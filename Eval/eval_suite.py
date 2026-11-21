@@ -67,10 +67,13 @@ FIXED_POSITIONS = 50
 MOVING_POSITIONS = 50
 JUDGE_EVERY = 50        # the checkpoint scores every position itself (0 / None turns it off)
 JUDGE_SIMS = None       # None = the sims the positions were scored with, so q is comparable to q_ref
+TEST_EVERY = 50         # print the search's Q of the best / blunder moves in the test positions (0 / None turns it off)
+TEST_SIMS = 3000
 
 WORKERS = 6             # standalone runs only; the training loop passes its own Pool
 POSITIONS_DIR = Path(__file__).resolve().parent / "eval_positions"
 RESULTS_DIR = Path(__file__).resolve().parent / "training"
+TEST_POSITIONS = POSITIONS_DIR / "test_positions.json"     # hand-picked positions the engine got wrong (best vs blunder)
 
 OPPONENTS = ["greedy", "fixed", "moving"]
 BUCKETS = ["losing", "worse", "balanced", "better", "winning"]
@@ -309,11 +312,60 @@ def judge_checkpoint(pool, agent_cls, cycle, positions_path, csv_path, sims=JUDG
     return rows
 
 
+def _test(args):
+    """Search one test position. Returns (task id, label of the move search picks,
+    {label: (Q White's view or None if unvisited, visits)} for the position's best and blunder moves)."""
+    import numpy as np
+    from Model.util import decode
+
+    task_id, model_cls, model_path, pos, sims = args
+    agent = _agent(model_cls, model_path)
+    agent.mcts.reset()
+    state = opening_state(pos["moves"])
+    picked = agent.mcts.calculate_move(state, agent.model, False, agent.CREATE_BOARD, num_simulations=sims)
+    root = agent.mcts.root
+    found = {_as_tuple(decode(m, state.turn)): i for i, m in enumerate(root.moves)}
+    stats = {}
+    for key in ("best", "blunder"):
+        i = found[_as_tuple(pos[key + "_move"])]
+        n = int(root.children_visits[i])
+        child = root.children[i]
+        if child is not None and child.proven is not None:
+            q = float(child.proven * child.color)               # proven is for the side to move at the child
+        else:
+            q = float(root.children_values[i] / n * root.color) if n else None
+        stats[pos[key]] = (q, n)
+    labels = {_as_tuple(pos[k + "_move"]): pos[k] for k in ("best", "blunder")}
+    agent.mcts.reset()
+    return task_id, labels.get(_as_tuple(picked), "other"), stats
+
+
+def _as_tuple(move):
+    return tuple(tuple(int(x) for x in sq) for sq in move)
+
+
+def test_checkpoint(pool, agent_cls, cycle, positions_path=TEST_POSITIONS, sims=TEST_SIMS):
+    """Print, for each test position, the move gen_{cycle} picks and the search's Q (White's view) and visits
+    of the position's best and blunder moves. Printout only; nothing is saved."""
+    positions_path = Path(positions_path)
+    if not positions_path.exists():
+        return
+    positions = load_book(positions_path)["openings"]
+    model_path = str(_ckpt(agent_cls, cycle))
+    tasks = [(i, agent_cls, model_path, pos, sims) for i, pos in enumerate(positions)]
+    for i, picked, stats in sorted(pool.imap_unordered(_test, tasks), key=lambda r: r[0]):
+        pos = positions[i]
+        moves = "   ".join(f"{label} q {'-' if q is None else f'{q:+.2f}'} (n {n})" for label, (q, n) in stats.items())
+        mark = "ok" if picked == pos["best"] else "MISS"
+        print(f"gen_{cycle:03d} test {pos.get('name', i)}: picks {picked} [{mark}]   {moves}   ({sims} sims)", flush=True)
+
+
 def eval_checkpoint(pool, agent_cls, cycle, positions_path=None, csv_path=None,
                     greedy_every=GREEDY_EVERY, fixed_gen=FIXED_GEN, fixed_every=FIXED_EVERY,
                     moving_gap=MOVING_GAP, moving_every=MOVING_EVERY,
                     greedy_positions=GREEDY_POSITIONS, fixed_positions=FIXED_POSITIONS, moving_positions=MOVING_POSITIONS,
-                    judge_every=JUDGE_EVERY, judge_sims=JUDGE_SIMS, judge_csv_path=None):
+                    judge_every=JUDGE_EVERY, judge_sims=JUDGE_SIMS, judge_csv_path=None,
+                    test_every=TEST_EVERY, test_sims=TEST_SIMS):
     """
     Play whichever matchups are due for gen_{cycle} of agent_cls (see due_matchups), append each to the CSV
     and print a one-line score for it. Matchups already in the CSV are skipped.
@@ -323,11 +375,15 @@ def eval_checkpoint(pool, agent_cls, cycle, positions_path=None, csv_path=None,
     csv_path: results file (default: default_csv(agent_cls, positions_path)).
     judge_every: every this many cycles the checkpoint also scores all the positions itself (judge_checkpoint),
     with judge_sims (None = the book's), into judge_csv_path (default: default_judge_csv). 0 / None turns it off.
+    test_every: every this many cycles, print how the checkpoint searches the test positions (test_checkpoint),
+    with test_sims. 0 / None turns it off.
     Returns {opponent name: (wins, draws, losses)} for the matchups played.
     """
     model_path = _ckpt(agent_cls, cycle)
     due = due_matchups(agent_cls, cycle, greedy_every, fixed_gen, fixed_every, moving_gap, moving_every)
     judge_due = bool(judge_every) and cycle > 0 and cycle % judge_every == 0
+    if test_every and cycle > 0 and cycle % test_every == 0:
+        test_checkpoint(pool, agent_cls, cycle, sims=test_sims)
     if not due and not judge_due:
         return {}
     positions_path = positions_path or default_positions(agent_cls, fixed_gen if fixed_gen is not None else FIXED_GEN)
@@ -443,6 +499,8 @@ if __name__ == "__main__":
     parser.add_argument("--moving-positions", type=int, default=MOVING_POSITIONS)
     parser.add_argument("--judge-every", type=int, default=JUDGE_EVERY, help="the checkpoint scores every position itself; 0 turns it off")
     parser.add_argument("--judge-sims", type=int, default=JUDGE_SIMS, help="default: the sims the positions were scored with")
+    parser.add_argument("--test-every", type=int, default=TEST_EVERY, help="print Q of the test positions' best / blunder moves; 0 turns it off")
+    parser.add_argument("--test-sims", type=int, default=TEST_SIMS)
     parser.add_argument("--positions", default=None, help="eval positions file (default: Eval/eval_positions/<agent>_gen_<fixed-gen>.json)")
     parser.add_argument("--csv", default=None, help="results CSV (default: Eval/training/<agent>/<agent>_suite_<scoring checkpoint>.csv)")
     parser.add_argument("--summary", action="store_true", help="print the per-bucket table from the CSV instead of playing")
@@ -457,4 +515,5 @@ if __name__ == "__main__":
             greedy_every=args.greedy_every, fixed_gen=args.fixed_gen, fixed_every=args.fixed_every,
             moving_gap=args.moving_gap, moving_every=args.moving_every, greedy_positions=args.greedy_positions,
             fixed_positions=args.fixed_positions, moving_positions=args.moving_positions,
-            judge_every=args.judge_every, judge_sims=args.judge_sims)
+            judge_every=args.judge_every, judge_sims=args.judge_sims,
+            test_every=args.test_every, test_sims=args.test_sims)
