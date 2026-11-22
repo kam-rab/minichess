@@ -198,4 +198,17 @@ def comparison():
     print("CE floor:", -np.sum(holdout_y[0] * np.log(np.where(holdout_y[0] > 0, holdout_y[0], 1))) / len(holdout_y[0]), " MSE baseline:", np.mean(holdout_y[1]**2))
 
 
+def save_avg(agent_class, gen, num_checkpoints):
+    """
+    Used to save models whose weights are the average of num_checkpoints checkpoints. 
+    Averages over gen - 25*(num_checkpoints-1) to gen. 
+    These are intended to be the strongest models, averaging out noise. 
+    """
+    save_dir = Path(f"{agent_class.CHECKPOINT_DIR.parent}/{agent_class.CHECKPOINT_DIR.name}_avg")
+    save_dir.mkdir(exist_ok=True)
+    gens = [np.load(agent_class.CHECKPOINT_DIR / f"gen_{gen-25*i}.npz") for i in range(num_checkpoints)]
+    np.savez(save_dir / f"avg{num_checkpoints}_{gen}.npz", *[np.mean([g[k] for g in gens], axis=0) for k in gens[0].files])
+    
+
+
 

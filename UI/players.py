@@ -34,6 +34,8 @@ def discover_agents():
 
         if isinstance(getattr(module, "Agent", None), type):
             factory = module.Agent
+            if hasattr(factory, "PREFER_AVG"):
+                factory.PREFER_AVG = True       # play the latest averaged checkpoint (Training/Checkpoints/<agent>_avg/)
         elif callable(getattr(module, "get_move", None)):
             factory = lambda module=module: module  # the module itself acts as the agent
         else:

@@ -9,7 +9,9 @@ from Agents.AIs.l2 import Agent as l2
 from Agents.AIs.leela import Agent as leela
 
 if __name__=="__main__":
-    train(leela, resume_training=True, num_cycles=2501)
+    # train(leela, resume_training=True, num_cycles=2501)
+    for gen in range(6500, 8500, 500):
+        save_avg(leela, gen, 16)
     
 
 """
@@ -24,5 +26,8 @@ python -m Eval.plot_results --agent AGENT_NAME --games --watch
 
 To watch conversion scatters in real time, run:
 python -m Eval.plot_results --agent AGENT_NAME --material --watch --last 100 
+
+To get eval round_robin results, run:
+python -m Eval.round_robin --name avgs --models avg16_6500 avg16_7000 avg16_7500 avg16_8000
 """
 
